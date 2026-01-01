@@ -1,0 +1,24 @@
+# AV Rack Documentation Generator - Phase 1
+# Install with: pip install -r requirements.txt
+
+# PDF Generation
+reportlab>=4.0.0
+
+# OpenAI API for product specs
+openai>=1.0.0
+
+# Airtable API (optional, for product catalog sync)
+pyairtable>=2.0.0
+
+# MySQL Database
+mysql-connector-python>=8.0.0
+
+# Image handling
+Pillow>=10.0.0
+
+# HTTP requests (backup for Airtable)
+requests>=2.31.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
