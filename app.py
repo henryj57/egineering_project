@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AV Rack Documentation Generator - Web Interface
-Upload a CSV and get a professional rack elevation PDF
+AV Documentation Generator - Web Interface
+Upload a CSV and get professional rack elevations and block diagrams
 """
 
 import streamlit as st
@@ -27,8 +27,8 @@ except (ImportError, ValueError, PermissionError, OSError):
 
 # Page configuration
 st.set_page_config(
-    page_title="AV Rack Elevation Generator",
-    page_icon="🗄️",
+    page_title="AV Documentation Generator",
+    page_icon="📐",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -80,6 +80,14 @@ st.markdown("""
         font-size: 0.8rem;
         max-height: 400px;
         overflow-y: auto;
+    }
+    .section-header {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #1E3A5F;
+        margin: 1rem 0 0.5rem 0;
+        padding-bottom: 0.3rem;
+        border-bottom: 2px solid #E67E22;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -262,51 +270,98 @@ def generate_rack_preview_text(layout):
     return "\n".join(lines)
 
 
+def detect_system_defaults(csv_path):
+    """Auto-detect system settings from equipment in CSV"""
+    defaults = {
+        'video': 'Centralized',
+        'audio': 'Centralized',
+        'network': 'All Networked',
+        'control': 'Savant',
+        'rack_location': 'Equipment Closet'
+    }
+    
+    try:
+        with open(csv_path, 'r', encoding='latin-1') as f:
+            content = f.read().lower()
+            
+            # Detect control system
+            if 'savant' in content or 'ssc-' in content or 'pkg-mac' in content:
+                defaults['control'] = 'Savant'
+            elif 'control4' in content or 'c4-' in content:
+                defaults['control'] = 'Control4'
+            elif 'crestron' in content or 'cp4' in content:
+                defaults['control'] = 'Crestron'
+            
+            # Detect video distribution
+            if 'ps65' in content or 'ps80' in content or 'ub32' in content:
+                defaults['video'] = 'Centralized (IP Video)'
+            elif 'hdmi matrix' in content or 'hdbt' in content:
+                defaults['video'] = 'Centralized (Matrix)'
+            
+            # Detect audio
+            if 'pav-sipa' in content or 'savant amp' in content:
+                defaults['audio'] = 'Centralized'
+            elif 'sonos' in content:
+                defaults['audio'] = 'Distributed (Sonos)'
+            
+            # Try to detect rack location
+            if 'equipment closet' in content:
+                defaults['rack_location'] = 'Equipment Closet'
+            elif 'mdf' in content:
+                defaults['rack_location'] = 'MDF'
+            elif 'basement' in content:
+                defaults['rack_location'] = 'Basement Equipment Room'
+                
+    except Exception:
+        pass
+    
+    return defaults
+
+
 def main():
     # Header
-    st.markdown('<p class="main-header">🗄️ AV Rack Elevation Generator</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Upload a client CSV and generate professional rack elevation PDFs</p>', unsafe_allow_html=True)
+    st.markdown('<p class="main-header">📐 AV Documentation Generator</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Upload a CSV to generate professional rack elevations and system block diagrams</p>', unsafe_allow_html=True)
     
     # Sidebar settings
     with st.sidebar:
-        st.header("⚙️ Settings")
+        st.header("⚙️ Project Settings")
         
-        project_name = st.text_input("Project Name", value="AV System", help="Name of the project for the title block")
-        company_name = st.text_input("Company Name", value="Your Company", help="Your company name for the title block")
+        project_name = st.text_input("Project Name", value="AV System", help="Name of the project")
+        company_name = st.text_input("Company Name", value="Your Company", help="Your company name")
         
         st.divider()
+        
+        # Output options
+        st.markdown('<p class="section-header">📄 Output Options</p>', unsafe_allow_html=True)
+        
+        generate_rack = st.checkbox("🗄️ Rack Elevation", value=True, help="Generate rack elevation diagram")
+        generate_block = st.checkbox("📊 Block Diagram", value=True, help="Generate system block diagram")
         
         page_size = st.selectbox(
             "Page Size",
             options=["tabloid", "arch_c", "arch_d", "letter"],
             format_func=lambda x: {
                 "letter": "Letter (8.5×11)",
-                "tabloid": "Tabloid (11×17) - Recommended",
+                "tabloid": "Tabloid (11×17)",
                 "arch_c": "ARCH C (18×24)",
-                "arch_d": "ARCH D (24×36) - Print"
+                "arch_d": "ARCH D (24×36)"
             }[x],
-            index=0,
-            help="Page size for the PDF. Tabloid works well on screen, ARCH D for client prints."
-        )
-        
-        rack_size_override = st.number_input(
-            "Rack Size (U)",
-            min_value=8,
-            max_value=52,
-            value=42,
-            help="Default rack size. Set to 0 to auto-detect from CSV."
+            index=0
         )
         
         st.divider()
         
-        use_database = st.checkbox("Use MySQL Database", value=DATABASE_AVAILABLE, disabled=not DATABASE_AVAILABLE)
-        use_ai = st.checkbox("Use AI (OpenAI)", value=True, help="Use OpenAI to look up product specs")
+        # Data sources
+        st.markdown('<p class="section-header">🔌 Data Sources</p>', unsafe_allow_html=True)
+        use_database = st.checkbox("MySQL Database", value=DATABASE_AVAILABLE, disabled=not DATABASE_AVAILABLE)
+        use_ai = st.checkbox("OpenAI (AI Lookup)", value=True)
         
         if not DATABASE_AVAILABLE:
             st.caption("⚠️ MySQL not configured")
     
-    # Main content area
-    col1, col2 = st.columns([1, 1])
+    # Main content area - 3 columns
+    col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
         st.header("📤 Upload CSV")
@@ -317,11 +372,15 @@ def main():
             help="Upload a client proposal CSV with equipment list"
         )
         
+        # Store CSV path in session for other functions
+        tmp_csv_path = None
+        
         if uploaded_file is not None:
             # Save uploaded file temporarily
             with tempfile.NamedTemporaryFile(delete=False, suffix='.csv', mode='wb') as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
                 tmp_csv_path = tmp_file.name
+                st.session_state['tmp_csv_path'] = tmp_csv_path
             
             try:
                 # Detect racks from CSV
@@ -333,172 +392,320 @@ def main():
                 if rack_info['racks']:
                     st.write(f"**🗄️ Detected Racks:** {rack_info['total_racks']}")
                     for rack in rack_info['racks']:
-                        st.write(f"  • {rack.model}: {rack.size_u}U ({rack.rack_type})")
+                        st.write(f"  • {rack.model}: {rack.size_u}U")
                     detected_size = rack_info['default_size']
                 else:
-                    detected_size = rack_size_override
-                    st.write("ℹ️ No rack enclosures detected in CSV")
+                    detected_size = 42
+                    st.write("ℹ️ No rack enclosures detected")
                 
+                st.session_state['detected_rack_size'] = detected_size
                 st.markdown('</div>', unsafe_allow_html=True)
                 
-                # Use detected size if available
-                actual_rack_size = detected_size if rack_size_override == 42 else rack_size_override
+                # Auto-detect system settings
+                defaults = detect_system_defaults(tmp_csv_path)
+                st.session_state['system_defaults'] = defaults
                 
-                # Generate button
-                if st.button("🚀 Generate Rack Elevation", type="primary", use_container_width=True):
-                    with st.spinner("Processing..."):
-                        # Progress container
-                        progress_container = st.empty()
-                        
-                        def update_progress(msg):
-                            progress_container.info(msg)
-                        
-                        # Parse CSV
-                        update_progress("📄 Parsing CSV...")
-                        products = parse_client_csv(tmp_csv_path)
-                        products = get_unique_products_with_quantities(products)
-                        
-                        if not products:
-                            st.error("❌ No products found in CSV")
-                            return
-                        
-                        update_progress(f"📦 Found {len(products)} unique products")
-                        
-                        # Enrich with specs
-                        rack_items = enrich_products_with_specs_streamlit(
-                            products,
-                            use_database=use_database,
-                            use_ai=use_ai,
-                            progress_callback=update_progress
-                        )
-                        
-                        # Expand quantities
-                        rack_items = expand_quantities(rack_items)
-                        
-                        if not rack_items:
-                            st.error("❌ No rack-mountable items found")
-                            return
-                        
-                        update_progress(f"🗄️ {len(rack_items)} items to rack")
-                        
-                        # Calculate total U needed
-                        total_u = sum(item.rack_units for item in rack_items)
-                        
-                        # Check if we need to split
-                        layouts = []
-                        if total_u > (actual_rack_size - 3):
-                            av_items, network_items = split_into_av_and_network(rack_items)
-                            
-                            av_u = sum(item.rack_units for item in av_items)
-                            av_rack_size = 48 if av_u + len(av_items)//2 > (actual_rack_size - 4) else actual_rack_size
-                            
-                            if av_items:
-                                av_layout = arrange_rack(av_items, rack_size_u=av_rack_size)
-                                av_layout.project_name = f"{project_name} - AV Rack ({av_rack_size}U)"
-                                layouts.append(("AV Rack", av_layout))
-                            
-                            if network_items:
-                                net_layout = arrange_rack(network_items, rack_size_u=actual_rack_size)
-                                net_layout.project_name = f"{project_name} - Network Rack ({actual_rack_size}U)"
-                                layouts.append(("Network Rack", net_layout))
-                        else:
-                            layout = arrange_rack(rack_items, rack_size_u=actual_rack_size)
-                            layout.project_name = project_name
-                            layouts.append(("Main Rack", layout))
-                        
-                        # Generate PDF
-                        update_progress("📑 Generating PDF...")
-                        
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
-                            tmp_pdf_path = tmp_pdf.name
-                        
-                        all_layouts = [l[1] for l in layouts]
-                        generate_rack_pdf(
-                            layout=all_layouts if len(all_layouts) > 1 else all_layouts[0],
-                            output_path=tmp_pdf_path,
-                            project_name=project_name,
-                            company_name=company_name,
-                            revision="A",
-                            page_size=page_size
-                        )
-                        
-                        # Store results in session state
-                        st.session_state['pdf_path'] = tmp_pdf_path
-                        st.session_state['layouts'] = layouts
-                        st.session_state['project_name'] = project_name
-                        
-                        progress_container.empty()
-                        st.success(f"✅ Generated {len(layouts)} page(s)!")
-                        st.rerun()
-            
             except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
-                import traceback
-                st.code(traceback.format_exc())
-            
-            finally:
-                # Clean up temp CSV
-                if os.path.exists(tmp_csv_path):
-                    os.unlink(tmp_csv_path)
+                st.error(f"❌ Error reading CSV: {str(e)}")
     
     with col2:
-        st.header("📄 Preview & Download")
+        st.header("🎛️ System Configuration")
         
-        if 'pdf_path' in st.session_state and os.path.exists(st.session_state['pdf_path']):
-            # Show rack layout previews
-            for name, layout in st.session_state.get('layouts', []):
-                with st.expander(f"🗄️ {name} ({layout.rack_size_u}U)", expanded=True):
-                    preview_text = generate_rack_preview_text(layout)
-                    st.markdown(f'<div class="rack-preview">{preview_text}</div>', unsafe_allow_html=True)
-                    
-                    # Stats
-                    col_a, col_b, col_c = st.columns(3)
-                    col_a.metric("Equipment", f"{layout.total_equipment_u}U")
-                    col_b.metric("Weight", f"{layout.total_weight:.0f} lbs")
-                    col_c.metric("BTU", f"{layout.total_btu:.0f}")
+        if uploaded_file is not None:
+            defaults = st.session_state.get('system_defaults', {})
             
-            st.divider()
+            # Rack settings
+            st.markdown('<p class="section-header">🗄️ Rack Settings</p>', unsafe_allow_html=True)
             
-            # Download button
-            with open(st.session_state['pdf_path'], 'rb') as pdf_file:
-                pdf_bytes = pdf_file.read()
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_name = st.session_state.get('project_name', 'Rack').replace(' ', '_')
-            filename = f"Rack_Elevation_{safe_name}_{timestamp}.pdf"
-            
-            st.download_button(
-                label="⬇️ Download PDF",
-                data=pdf_bytes,
-                file_name=filename,
-                mime="application/pdf",
-                type="primary",
-                use_container_width=True
+            detected_size = st.session_state.get('detected_rack_size', 42)
+            rack_size = st.number_input(
+                "Rack Size (U)",
+                min_value=8,
+                max_value=52,
+                value=detected_size,
+                help="Rack unit height"
             )
             
-            # Show PDF preview (embedded)
+            rack_location = st.text_input(
+                "Rack Location Name",
+                value=defaults.get('rack_location', 'Equipment Closet'),
+                help="Name for the head-end location"
+            )
+            
+            # System Intent Questions
+            st.markdown('<p class="section-header">📊 System Architecture</p>', unsafe_allow_html=True)
+            
+            video_dist = st.selectbox(
+                "Video Distribution",
+                options=["Centralized (IP Video)", "Centralized (Matrix)", "Distributed", "Hybrid", "None"],
+                index=0 if 'Centralized' in defaults.get('video', '') else 2,
+                help="How video is distributed throughout the home"
+            )
+            
+            audio_arch = st.selectbox(
+                "Audio Architecture", 
+                options=["Centralized", "Distributed (Sonos)", "Distributed (HEOS)", "Hybrid", "None"],
+                index=0 if 'Centralized' in defaults.get('audio', '') else 1,
+                help="How audio is distributed"
+            )
+            
+            network_arch = st.selectbox(
+                "Network Architecture",
+                options=["All Networked", "Partial", "Standalone"],
+                index=0,
+                help="Network connectivity approach"
+            )
+            
+            control_system = st.selectbox(
+                "Control System",
+                options=["Savant", "Control4", "Crestron", "RTI", "URC", "Other", "None"],
+                index=["Savant", "Control4", "Crestron", "RTI", "URC", "Other", "None"].index(defaults.get('control', 'Savant')),
+                help="Primary automation/control system"
+            )
+            
+            # Store in session state
+            st.session_state['system_config'] = {
+                'rack_size': rack_size,
+                'rack_location': rack_location,
+                'video': video_dist.split(' ')[0],  # Just "Centralized", "Distributed", etc.
+                'audio': audio_arch.split(' ')[0],
+                'network': network_arch,
+                'control': control_system
+            }
+            
             st.divider()
-            st.subheader("PDF Preview")
             
-            # Encode PDF for display
-            base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-            pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
-            st.markdown(pdf_display, unsafe_allow_html=True)
-        
+            # Generate button
+            if st.button("🚀 Generate Documents", type="primary", use_container_width=True):
+                if not generate_rack and not generate_block:
+                    st.warning("Please select at least one output type")
+                else:
+                    generate_documents(
+                        tmp_csv_path, 
+                        project_name, 
+                        company_name,
+                        st.session_state['system_config'],
+                        generate_rack,
+                        generate_block,
+                        use_database,
+                        use_ai,
+                        page_size
+                    )
         else:
-            st.info("👆 Upload a CSV and click 'Generate' to see the rack elevation preview")
+            st.info("👈 Upload a CSV file to configure system settings")
             
-            # Show example
             with st.expander("📋 Example CSV Format"):
                 st.code("""Quantity,Part Number,Cost Price,Sell Price,Phase,LocationPath,System
 1,USW-PRO-24-POE,1200,1500,Finish,Equipment Closet,Network & WiFi
 1,UDM-PRO-MAX,600,750,Finish,Equipment Closet,Network & WiFi
 1,PAV-SIPA125SM-10,2310,3000,Finish,Equipment Closet,Audio
-1,SSC-0012,321,450,Finish,Equipment Closet,Automation
-1,HQP7-2,913,1200,Finish,Equipment Closet,Lighting Control
+1,QN65QN90FAFXZA,1200,1800,Finish,1st Level: Living Room,Video
+1,PS65,700,1000,Finish,1st Level: Living Room,Video
 """, language="csv")
+    
+    with col3:
+        st.header("📄 Preview & Download")
+        
+        # Check for generated files
+        if 'generated_files' in st.session_state:
+            files = st.session_state['generated_files']
+            
+            for file_info in files:
+                with st.expander(f"📄 {file_info['name']}", expanded=True):
+                    if file_info['type'] == 'rack':
+                        # Show rack preview
+                        for name, layout in file_info.get('layouts', []):
+                            st.write(f"**{name}** ({layout.rack_size_u}U)")
+                            col_a, col_b, col_c = st.columns(3)
+                            col_a.metric("Equipment", f"{layout.total_equipment_u}U")
+                            col_b.metric("Weight", f"{layout.total_weight:.0f} lbs")
+                            col_c.metric("BTU", f"{layout.total_btu:.0f}")
+                    elif file_info['type'] == 'block':
+                        st.write("System block diagram showing equipment distribution")
+            
+            st.divider()
+            
+            # Combined download or separate downloads
+            if len(files) == 1:
+                file_info = files[0]
+                with open(file_info['path'], 'rb') as f:
+                    pdf_bytes = f.read()
+                
+                st.download_button(
+                    label=f"⬇️ Download {file_info['name']}",
+                    data=pdf_bytes,
+                    file_name=file_info['filename'],
+                    mime="application/pdf",
+                    type="primary",
+                    use_container_width=True
+                )
+            else:
+                # Multiple files - offer separate downloads
+                for file_info in files:
+                    with open(file_info['path'], 'rb') as f:
+                        pdf_bytes = f.read()
+                    
+                    st.download_button(
+                        label=f"⬇️ {file_info['name']}",
+                        data=pdf_bytes,
+                        file_name=file_info['filename'],
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key=f"download_{file_info['name']}"
+                    )
+            
+            # Show PDF preview
+            st.divider()
+            st.subheader("PDF Preview")
+            
+            # Show first file preview
+            if files:
+                with open(files[0]['path'], 'rb') as f:
+                    pdf_bytes = f.read()
+                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="500" type="application/pdf"></iframe>'
+                st.markdown(pdf_display, unsafe_allow_html=True)
+        else:
+            st.info("👈 Configure settings and click 'Generate' to create documents")
+
+
+def generate_documents(csv_path, project_name, company_name, config, 
+                       generate_rack, generate_block, use_database, use_ai, page_size):
+    """Generate all requested documents"""
+    
+    generated_files = []
+    progress = st.progress(0, text="Starting...")
+    
+    try:
+        # Parse CSV
+        progress.progress(10, text="📄 Parsing CSV...")
+        products = parse_client_csv(csv_path)
+        products = get_unique_products_with_quantities(products)
+        
+        if not products:
+            st.error("❌ No products found in CSV")
+            return
+        
+        # Generate Rack Elevation
+        if generate_rack:
+            progress.progress(30, text="🗄️ Processing rack items...")
+            
+            rack_items = enrich_products_with_specs_streamlit(
+                products,
+                use_database=use_database,
+                use_ai=use_ai
+            )
+            
+            rack_items = expand_quantities(rack_items)
+            
+            if rack_items:
+                total_u = sum(item.rack_units for item in rack_items)
+                rack_size = config['rack_size']
+                
+                layouts = []
+                if total_u > (rack_size - 3):
+                    av_items, network_items = split_into_av_and_network(rack_items)
+                    
+                    av_u = sum(item.rack_units for item in av_items)
+                    av_rack_size = 48 if av_u + len(av_items)//2 > (rack_size - 4) else rack_size
+                    
+                    if av_items:
+                        av_layout = arrange_rack(av_items, rack_size_u=av_rack_size)
+                        av_layout.project_name = f"{project_name} - AV Rack"
+                        layouts.append(("AV Rack", av_layout))
+                    
+                    if network_items:
+                        net_layout = arrange_rack(network_items, rack_size_u=rack_size)
+                        net_layout.project_name = f"{project_name} - Network Rack"
+                        layouts.append(("Network Rack", net_layout))
+                else:
+                    layout = arrange_rack(rack_items, rack_size_u=rack_size)
+                    layout.project_name = project_name
+                    layouts.append(("Main Rack", layout))
+                
+                # Generate PDF
+                progress.progress(50, text="📑 Generating rack PDF...")
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+                    rack_pdf_path = tmp_pdf.name
+                
+                all_layouts = [l[1] for l in layouts]
+                generate_rack_pdf(
+                    layout=all_layouts if len(all_layouts) > 1 else all_layouts[0],
+                    output_path=rack_pdf_path,
+                    project_name=project_name,
+                    company_name=company_name,
+                    revision="A",
+                    page_size=page_size
+                )
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                generated_files.append({
+                    'name': 'Rack Elevation',
+                    'type': 'rack',
+                    'path': rack_pdf_path,
+                    'filename': f"Rack_Elevation_{project_name.replace(' ', '_')}_{timestamp}.pdf",
+                    'layouts': layouts
+                })
+        
+        # Generate Block Diagram
+        if generate_block:
+            progress.progress(70, text="📊 Generating block diagram...")
+            
+            try:
+                from block_diagram import generate_block_diagram, SystemIntent
+                
+                # Create intent from config
+                intent = SystemIntent(
+                    video_distribution=config['video'],
+                    audio_architecture=config['audio'],
+                    network_architecture=config['network'],
+                    control_system=config['control'],
+                    rack_location=config['rack_location']
+                )
+                
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_pdf:
+                    block_pdf_path = tmp_pdf.name
+                
+                generate_block_diagram(
+                    equipment_csv=csv_path,
+                    output_path=block_pdf_path,
+                    project_name=project_name,
+                    intent=intent,
+                    page_size=page_size
+                )
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                generated_files.append({
+                    'name': 'Block Diagram',
+                    'type': 'block',
+                    'path': block_pdf_path,
+                    'filename': f"Block_Diagram_{project_name.replace(' ', '_')}_{timestamp}.pdf"
+                })
+                
+            except Exception as e:
+                st.warning(f"⚠️ Block diagram generation failed: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+        
+        progress.progress(100, text="✅ Done!")
+        
+        # Store results
+        st.session_state['generated_files'] = generated_files
+        
+        if generated_files:
+            st.success(f"✅ Generated {len(generated_files)} document(s)!")
+            st.rerun()
+        else:
+            st.warning("No documents were generated")
+            
+    except Exception as e:
+        st.error(f"❌ Error: {str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
+    finally:
+        progress.empty()
 
 
 if __name__ == "__main__":
     main()
-
