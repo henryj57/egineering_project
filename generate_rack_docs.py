@@ -35,6 +35,17 @@ except (ImportError, ValueError) as e:
     DATABASE_AVAILABLE = False
     print(f"ℹ️  MySQL Database not configured: {e}")
 
+# Display name overrides for products with confusing part numbers
+DISPLAY_NAME_OVERRIDES = {
+    'pkg-macunlimited-3pfl-02': 'Savant Pro Host 5200',
+    'pkg-macunlimited': 'Savant Pro Host 5200',
+    'pkg-s2rem-40': 'Savant Smart Host',
+    'pkg-s2rem': 'Savant Smart Host',
+    'rck-5000': 'Savant Rack Mount Kit',
+    'ssl-evomace-1yr': 'Savant License (1yr)',
+    'ssc-0012': 'Savant Expansion Module',
+}
+
 
 def split_into_av_and_network_racks(rack_items: list[RackItem]) -> tuple[list[RackItem], list[RackItem]]:
     """
@@ -114,15 +125,182 @@ def is_clearly_not_rack_mountable(product) -> bool:
         return True
     
     # Check for non-rack keywords in name/category
-    name = (product.name or '').lower()
-    category = (product.category or '').lower()
-    model = (product.model or '').lower()
-    brand = (product.brand or '').lower()
+    # Normalize strings - remove hidden/special characters that break matching
+    import re
+    def normalize(s):
+        if not s:
+            return ''
+        # Remove non-ASCII characters and normalize
+        return re.sub(r'[^\x00-\x7F]+', '', s).lower().strip()
     
-    # Network equipment brands - ALWAYS include these
+    name = normalize(product.name)
+    category = normalize(product.category)
+    model = normalize(product.model)
+    part_number = normalize(product.part_number)
+    brand = normalize(product.brand)
+    location = normalize(getattr(product, 'location', ''))
+    
+    # Check if item is assigned to a specific room (distributed equipment)
+    # These go in local closets, not the main rack
+    equipment_area_keywords = ['equipment closet', 'equipment room', 'systems:', 'mdf', 'idf', 'rack']
+    room_indicators = ['kitchen', 'den', 'suite', 'bedroom', 'bathroom', 'living', 'dining', 
+                       'office', 'garage', 'basement', 'attic', 'patio', 'pool', 'theater',
+                       'media room', 'gym', 'wine', 'laundry', 'entry', 'foyer', 'hallway']
+    
+    # Equipment that ALWAYS goes in rack regardless of location assignment
+    # (These are assigned to rooms for logical grouping, but physically in rack)
+    always_rack_equipment = [
+        'amplifier', 'amp', 'receiver', 'avr', 'processor', 'preamp',
+        'sonos amp', 'denon', 'marantz avr', 'anthem', 'arcam',
+        'sony str', 'straz', 'yamaha rx', 'onkyo',
+        # Savant packages with rack-mount hosts
+        'pkg-s2rem', 's2rem', 'rack mount smart host',
+    ]
+    is_always_rack = any(kw in name or kw in model or kw in category for kw in always_rack_equipment)
+    
+    # If location contains a room name but NOT an equipment area, it's distributed
+    # UNLESS it's equipment that always goes in the rack
+    is_room_location = any(room in location for room in room_indicators)
+    is_equipment_area = any(eq in location for eq in equipment_area_keywords)
+    
+    if is_room_location and not is_equipment_area and not is_always_rack:
+        return True  # Skip distributed equipment
+    
+    # ACCESSORY patterns - these are NEVER rack-mountable
+    accessory_patterns = [
+        'uacc-',           # Ubiquiti accessories (cables, connectors, HDDs)
+        'sfp', 'sfp+', 'sfp28',  # SFP modules and cables
+        '-hdd-',           # Hard drives (accessories)
+        'uplink',          # Uplink cables
+        '-cm-',            # Connector modules
+        'rj45-mg',         # RJ45 connectors
+        'data-sfp',        # SFP data cables
+        'conn-',           # Connectors
+        'data-lan',        # LAN cables
+    ]
+    if any(acc in model or acc in part_number for acc in accessory_patterns):
+        return True  # Skip accessories
+    
+    # WiFi access points - mount on ceilings/walls, not racks
+    wifi_ap_patterns = [
+        'u6-', 'u7-',       # Ubiquiti U6/U7 series APs
+        'uap-',             # Ubiquiti UniFi APs
+        ' e7', '-e7',       # Ubiquiti E7 APs
+        'e7 campus',        # Ubiquiti E7 Campus
+        'wifi ap', 'wi-fi ap',
+        # Ruckus APs - outdoor and indoor, all wall/ceiling mounted
+        '9u1-t310',         # Ruckus T310 outdoor AP
+        '9u1-t350',         # Ruckus T350 outdoor AP
+        '9u1-r',            # Ruckus indoor APs (R510, R650, etc.)
+        't310', 't350', 't610', 't710',  # Ruckus outdoor APs
+        # Access Networks/Ruckus APs
+        '901-r',            # Access Networks/Ruckus indoor APs
+        'access point',
+    ]
+    model_check = f" {model} "  # Add spaces for word boundary
+    if any(ap in model_check or ap in model or ap in part_number for ap in wifi_ap_patterns):
+        return True  # Skip WiFi APs
+    
+    # Check for exact model matches for E7 APs
+    if model.strip() in ['e7', 'e7 campus']:
+        return True
+    
+    # Lutron lighting devices - ALL go in electrical panels, enclosures, or walls
+    # None are standard 19" rack-mount - they use DIN rail
+    lutron_non_rack = [
+        'lqse-',      # Load controllers (electrical panel)
+        'pdw-',       # Pico dimmers (wall)
+        'pd8-', 'pd10-',  # Dimmers (wall)
+        'qs-wlb',     # Wireless link bridge
+        'hqr-',       # Repeaters
+        'qsps-',      # Power supply
+        'hwnw-kp',    # Keypads (wall)
+        'ebb-',       # Enclosure back box
+        'hqp',        # HomeWorks QS Processor (DIN rail, not rack-mount)
+        # RadioRA 2 devices - ALL wall-mounted
+        'rrd-pro',    # RadioRA 2 dimmers (wall box)
+        'rrd-6',      # RadioRA 2 dimmers (wall box)
+        'rrd-8',      # RadioRA 2 switches (wall box - like RRD-8ANS)
+        'rr-aux',     # RadioRA 2 auxiliary repeaters (wall-mounted)
+        'rr-main',    # RadioRA 2 main repeaters (wall-mounted)
+        'rr-sel',     # RadioRA 2 select
+        'rrd-w',      # RadioRA 2 wallbox devices
+    ]
+    if any(lut in model or lut in part_number for lut in lutron_non_rack):
+        return True  # Skip Lutron - all are DIN rail or wall-mount
+    
+    # Software licenses, accessories, and non-physical items
+    non_physical_items = [
+        'ssl-',       # Savant software licenses
+        '-1yr', '-2yr', '-3yr',  # Software subscriptions
+        'license',
+        'rck-',       # Rack mount kits (accessories, not equipment)
+        'ssc-',       # Expansion modules/accessories
+        'rmb-',       # Rack mount brackets
+    ]
+    if any(npi in model or npi in part_number for npi in non_physical_items):
+        return True  # Skip non-physical items
+    
+    # Wall-mounted sensors, thermostats, and HVAC controllers
+    climate_devices = [
+        'cli-thfm',   # Savant climate/thermostat sensors
+        'cli-8000',   # Savant climate controller (installs at HVAC unit)
+        'thfm',       # Thermostat sensors
+        'sensor',     # Generic sensors
+        'thermostat',
+        'hvac',
+    ]
+    if any(cd in model or cd in part_number for cd in climate_devices):
+        return True  # Skip climate/HVAC devices
+    
+    # Rack itself and rack accessories/packages (not equipment IN the rack)
+    rack_accessories = [
+        'equipment rack',  # The rack itself
+        'sa-20',           # Middle Atlantic shelf package
+        'sa-10',           # Middle Atlantic shelf package
+        'shelf',           # Shelves
+        'caster',          # Casters
+        'side panel',
+        'door',
+        'fan kit',
+        # Strong rack packages - the rack itself, not equipment
+        'sr-cust-',        # Strong custom rack packages
+        'sr-rack',         # Strong racks
+        'sr-fs-system',    # Strong FS Series rack systems
+        '-pkg',            # Rack packages
+        'rack system',     # Generic rack system
+    ]
+    if any(ra in model or ra in name for ra in rack_accessories):
+        return True  # Skip rack structure items
+    
+    # Ring and doorbell devices - wall/door mounted, not rack
+    doorbell_camera_devices = [
+        'ring ',           # Ring doorbells/cameras
+        '8ssxe',           # Ring Pro 2 doorbell
+        '8spps',           # Ring spotlight camera
+        '8sn1s',           # Ring stick up camera
+        'doorbell',
+        'video doorbell',
+        'ring alarm',
+        'ring cam',
+    ]
+    if any(dc in model or dc in name or dc in part_number for dc in doorbell_camera_devices):
+        return True  # Skip Ring and doorbell devices
+    
+    # Vertical power strips - mount on SIDE of rack, not in front RU space
+    vertical_power_strips = [
+        'wb-800vps',       # WattBox vertical power strips
+        '800vps',          # WattBox vertical power strips
+        'vps-ipvm',        # WattBox VPS series
+        'vertical power',
+    ]
+    if any(vps in model or vps in part_number for vps in vertical_power_strips):
+        return True  # Skip vertical/side-mounted power strips
+    
+    # Network equipment brands - include main equipment (not accessories)
     network_brands = ['araknis', 'ubiquiti', 'cisco', 'netgear', 'pakedge', 'access networks', 'motu']
     if any(nb in brand for nb in network_brands):
-        return False  # Keep network equipment
+        return False  # Keep network equipment (already filtered accessories above)
     
     # Networking category - ALWAYS include
     if 'networking' in category or 'switches' in category:
@@ -139,6 +317,45 @@ def is_clearly_not_rack_mountable(product) -> bool:
         'sensor', 'slab sensor',
         'back box', 'backbox', 'junction',
         'allowance', 'labor', 'installation',
+        # ICE cables - all are wire/cable products
+        'ice cable', 'ice ', '14-2cs', '16-2cs', 'cat 6a', 'rg-6',
+        # WirePath - keystone jacks, wallplates, structured wiring
+        'wirepath', 'wp-cat', 'rj45-',
+        # Carlon - electrical boxes
+        'carlon', 'sc100a',
+        # Projectors (ceiling mounted)
+        'projector', 'vpl-', 'vplvw', 'epson',
+        # Projection screens (motorized/fixed)
+        'severtson', 'seymour', 'if169', '2f120',
+        # Speakers and subwoofers (in-wall/in-ceiling/outdoor)
+        'isw4', 'isw-4',           # B&W in-wall subwoofer
+        'cwm7', 'cwm 7', 'cwm-7',  # B&W in-wall speakers
+        'ccm',                      # B&W in-ceiling speakers (CCM 362, CCM 632, etc.)
+        'am-1',                     # B&W outdoor speakers
+        'marine',                   # B&K marine speakers
+        'sa63', 'sa-63',           # James Loudspeaker subwoofer/speaker enclosures
+        'sa250',                   # B&K amplifiers (standalone, not rack)
+        # Triad Speakers (in-wall/in-ceiling)
+        'triad', '44406', '44408',
+        # Sonance ceiling/in-wall speakers
+        'sonance', 'vp64', 'vpxt6', 'vp-64', 'vpxt-6',
+        # Savant sensors
+        'sst-temp', 'sst-',        # Savant temperature sensors
+        'cli-slab', 'slab',        # Savant SLAB sensors
+        # Lutron RD-RD (relay device, wall/panel mount)
+        'rd-rd',
+        # Brackets and mounts (not rack equipment)
+        'pmk', 'bracket', 'mount',
+        # iPort wall stations and cases (wall-mounted, not rack)
+        'iport', 'luxe', 'wallstation', 'lx case',
+        # Shade/window treatment pre-wire
+        'shade', 'motorized window',
+        # Marantz receiver (standalone, not rack-mount without kit)
+        'marantz', 'sr6015',
+        # Turntables (standalone, not rack equipment)
+        'turntable', 'victrola',
+        # Touch panels (wall-mounted)
+        'itp-e',
     ]
     
     # Categories that are definitely not rack equipment
@@ -167,9 +384,10 @@ def enrich_products_with_specs(products: list[ProductFromCSV], use_database: boo
     Get product specifications and create RackItems.
     
     Priority:
-    1. MySQL Product Catalog (if configured)
-    2. OpenAI GPT-4 (fallback for products not in database)
-    3. CSV defaults (last resort)
+    1. D-Tools racks.db (fastest, most accurate)
+    2. MySQL Product Catalog (if configured)
+    3. OpenAI GPT-4 (fallback for products not in database)
+    4. CSV defaults (last resort)
     """
     rack_items = []
     specs_lookup = {}
@@ -186,17 +404,54 @@ def enrich_products_with_specs(products: list[ProductFromCSV], use_database: boo
     products = filtered_products
     print(f"📦 {len(products)} products after pre-filter\n")
     
-    # Step 1: Try MySQL Database first
-    if use_database and DATABASE_AVAILABLE:
+    # Step 0: Try D-Tools racks.db first (fastest, most accurate)
+    products_not_in_dtools = []
+    try:
+        from import_dtools_products import get_equipment_specs
+        print("📚 Looking up products in D-Tools catalog (racks.db)...")
+        dtools_found = 0
+        
+        for product in products:
+            model_num = product.part_number or product.model
+            dtools_specs = get_equipment_specs(model=model_num, part_number=product.part_number)
+            
+            if dtools_specs and dtools_specs.get('rack_units', 0) > 0:
+                lookup_key = f"{product.brand} {product.model}".strip().lower()
+                # If we have rack_units > 0, it's rack-mountable regardless of the flag
+                specs_lookup[lookup_key] = {
+                    'rack_units': dtools_specs['rack_units'],
+                    'weight': dtools_specs.get('weight', 5.0) or 5.0,
+                    'btu': dtools_specs.get('btu', 0) or 0,
+                    'depth': dtools_specs.get('depth', 0) or 0,
+                    'is_rack_mountable': True,  # Has RU height = rack-mountable
+                    'subsystem': '',
+                }
+                dtools_found += 1
+                print(f"  📚 D-Tools: {product.brand} {product.model}: {dtools_specs['rack_units']}U, {dtools_specs.get('watts', 0)}W")
+            else:
+                products_not_in_dtools.append(product)
+        
+        print(f"\n✅ Found {dtools_found} products in D-Tools catalog")
+        if products_not_in_dtools:
+            print(f"⚠️  {len(products_not_in_dtools)} products not in D-Tools (will try MySQL/OpenAI)\n")
+    except ImportError:
+        print("ℹ️  D-Tools catalog not available, using MySQL/OpenAI")
+        products_not_in_dtools = list(products)
+    except Exception as e:
+        print(f"⚠️  D-Tools lookup failed: {e}")
+        products_not_in_dtools = list(products)
+    
+    # Step 1: Try MySQL Database for remaining products
+    if use_database and DATABASE_AVAILABLE and products_not_in_dtools:
         try:
             db = get_database()
             print("✅ Connected to MySQL Product Catalog\n")
             
-            print("🗄️  Looking up products in database...")
+            print("🗄️  Looking up remaining products in MySQL...")
             db_found = 0
             missing_models = []
             
-            for product in products:
+            for product in products_not_in_dtools:
                 # Try to find in database by model number or part number
                 model_num = product.part_number or product.model
                 db_specs = db.get_rack_specs(model_num)
@@ -222,10 +477,10 @@ def enrich_products_with_specs(products: list[ProductFromCSV], use_database: boo
             
         except Exception as e:
             print(f"⚠️  Database lookup failed: {e}")
-            products_needing_ai = list(products)
+            products_needing_ai = list(products_not_in_dtools)
     else:
-        products_needing_ai = list(products)
-        if use_database and not DATABASE_AVAILABLE:
+        products_needing_ai = list(products_not_in_dtools)
+        if use_database and not DATABASE_AVAILABLE and products_not_in_dtools:
             print("ℹ️  MySQL Database not configured, using OpenAI only")
     
     # Step 2: Use OpenAI for products not found in Airtable
@@ -284,13 +539,21 @@ def enrich_products_with_specs(products: list[ProductFromCSV], use_database: boo
             
             source = specs.get('source', 'ai')
             source_icon = "📗" if source == 'airtable' else "🤖"
-            print(f"  {source_icon} {product.brand} {product.model}: {rack_units}U, {specs.get('weight', 0)}lbs, {specs.get('btu', 0)} BTU")
+            
+            # Apply display name override if available
+            display_model = product.model
+            model_key = (product.model or '').lower().strip()
+            if model_key in DISPLAY_NAME_OVERRIDES:
+                display_model = DISPLAY_NAME_OVERRIDES[model_key]
+                print(f"  {source_icon} {product.brand} {display_model} (was {product.model}): {rack_units}U, {specs.get('weight', 0)}lbs, {specs.get('btu', 0)} BTU")
+            else:
+                print(f"  {source_icon} {product.brand} {product.model}: {rack_units}U, {specs.get('weight', 0)}lbs, {specs.get('btu', 0)} BTU")
             
             rack_item = RackItem(
                 item_type=RackItemType.EQUIPMENT,
                 name=product.name,
                 brand=product.brand,
-                model=product.model,
+                model=display_model,
                 rack_units=int(rack_units),
                 weight=specs.get('weight', 10.0),
                 btu=specs.get('btu', 0) or product.calculated_btu or 0,

@@ -167,11 +167,42 @@ def enrich_products_with_specs_streamlit(products, use_database=True, use_ai=Tru
     if progress_callback:
         progress_callback(f"📦 {len(filtered_products)} products after filtering")
     
-    # Database lookup
-    if use_database and DATABASE_AVAILABLE:
+    # ========== STEP 1: D-Tools racks.db lookup (fastest, most accurate) ==========
+    products_not_in_dtools = []
+    try:
+        from import_dtools_products import get_equipment_specs
+        dtools_found = 0
+        for product in filtered_products:
+            model_num = product.part_number or product.model
+            dtools_specs = get_equipment_specs(model=model_num, part_number=product.part_number)
+            
+            if dtools_specs and dtools_specs.get('rack_units', 0) > 0:
+                lookup_key = f"{product.brand} {product.model}".strip().lower()
+                specs_lookup[lookup_key] = {
+                    'rack_units': dtools_specs['rack_units'],
+                    'weight': dtools_specs.get('weight', 5.0),
+                    'btu': dtools_specs.get('btu', 0),
+                    'depth': dtools_specs.get('depth', 0),
+                    'is_rack_mountable': dtools_specs.get('rack_mounted', True),
+                }
+                dtools_found += 1
+            else:
+                products_not_in_dtools.append(product)
+        
+        if progress_callback:
+            progress_callback(f"📚 Found {dtools_found} in D-Tools catalog")
+    except ImportError:
+        products_not_in_dtools = list(filtered_products)
+    except Exception as e:
+        if progress_callback:
+            progress_callback(f"⚠️ D-Tools lookup error: {e}")
+        products_not_in_dtools = list(filtered_products)
+    
+    # ========== STEP 2: MySQL database lookup (fallback) ==========
+    if use_database and DATABASE_AVAILABLE and products_not_in_dtools:
         try:
             db = get_database()
-            for product in filtered_products:
+            for product in products_not_in_dtools:
                 model_num = product.part_number or product.model
                 db_specs = db.get_rack_specs(model_num)
                 
@@ -181,9 +212,9 @@ def enrich_products_with_specs_streamlit(products, use_database=True, use_ai=Tru
                 else:
                     products_needing_ai.append(product)
         except Exception as e:
-            products_needing_ai = list(filtered_products)
+            products_needing_ai = list(products_not_in_dtools)
     else:
-        products_needing_ai = list(filtered_products)
+        products_needing_ai = list(products_not_in_dtools)
     
     # OpenAI lookup
     if use_ai and products_needing_ai:
@@ -354,8 +385,22 @@ def main():
         
         # Data sources
         st.markdown('<p class="section-header">🔌 Data Sources</p>', unsafe_allow_html=True)
-        use_database = st.checkbox("MySQL Database", value=DATABASE_AVAILABLE, disabled=not DATABASE_AVAILABLE)
-        use_ai = st.checkbox("OpenAI (AI Lookup)", value=True)
+        
+        # Check if D-Tools racks.db exists
+        import os
+        dtools_available = os.path.exists(os.path.join(os.path.dirname(__file__), "racks.db"))
+        
+        st.checkbox("📚 D-Tools Catalog", value=dtools_available, disabled=True, 
+                   help="racks.db - Primary source for accurate specs")
+        if dtools_available:
+            st.caption("✅ D-Tools catalog loaded (racks.db)")
+        else:
+            st.caption("⚠️ Run import_dtools_products.py to load catalog")
+        
+        use_database = st.checkbox("🗄️ MySQL Database", value=DATABASE_AVAILABLE, disabled=not DATABASE_AVAILABLE,
+                                  help="Fallback if not in D-Tools")
+        use_ai = st.checkbox("🤖 OpenAI (AI Lookup)", value=True,
+                            help="Last resort for unknown products")
         
         if not DATABASE_AVAILABLE:
             st.caption("⚠️ MySQL not configured")

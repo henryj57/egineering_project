@@ -43,6 +43,13 @@ env/
 *.pdf
 product_specs_cache.json
 
+# Database files
+racks.db
+*.db
+
+# CSV data files
+*.csv
+
 # Logs
 *.log
 
